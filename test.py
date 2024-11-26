@@ -1,126 +1,146 @@
-import numpy as np
-from collections import defaultdict
-import gymnasium as gym
+import numpy as np  
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import gymnasium as gym
+import time
+import os
+from collections import defaultdict
 
-def observation_to_tuple(observation):
-    """Convert observation into a clean tuple."""
-    return observation[0], observation[1], observation[2]
-
-def print_observation(observation):
-    """Print details of an observation."""
-    player_score, dealer_score, usable_ace = observation
-    print(f"Player Score: {player_score} (Usable Ace: {usable_ace}), Dealer Score: {dealer_score}")
-
-def initialize_random_policy():
-    """Initialize a random policy for the Blackjack environment."""
-    return lambda state: np.random.choice([0, 1])
-
-def generate_episode(env, policy):
-    """Generate an episode using the provided policy."""
-    state, _ = env.reset()
-    episode = []
-    start = True
-
-    while True:
-        if start:
-            action = np.random.choice(env.action_space.n)  # Exploring start
-            start = False
-        else:
-            action = policy(state)
-
-        next_state, reward, terminated, truncated, _ = env.step(action)
-        episode.append((state, action, reward))
-
-        if terminated or truncated:
-            break
-
-        state = next_state
-
-    return episode
-
-def update_q_values(episode, Q, returns_sum, returns_count):
-    """Update Q-values based on the episode."""
-    state_action_pairs = [(state, action) for state, action, _ in episode]
-    for idx, (state, action) in enumerate(state_action_pairs):
-        # Check if this is the first occurrence of the state-action pair in the episode
-        if (state, action) not in state_action_pairs[:idx]:
-            # Calculate the total return from this point onward
-            G = sum([reward for _, _, reward in episode[idx:]])
-
-            # Update the sum of returns and count fo    r the state-action pair
-            returns_sum[(state, action)] += G
-            returns_count[(state, action)] += 1
-
-            # Update the Q-value
-            Q[state][action] = returns_sum[(state, action)] / returns_count[(state, action)]
-
-def create_greedy_policy(Q):
-    """Create a greedy policy based on the Q-values."""
+def epsilon_greedy_policy(epsilon, Q, env):
     def policy(state):
         if state not in Q:
-            return np.random.choice([0, 1])  # Default action if state is unseen
-        return np.argmax(Q[state])
-
+            return np.random.choice(env.action_space.n)
+        else:
+            if np.random.random() > epsilon:
+                return np.argmax(Q[state])
+            else:
+                return np.random.choice(env.action_space.n)
     return policy
 
-def mc_control_with_exploring_starts(env, num_episodes, debug=False):
-    """Monte Carlo control with exploring starts for Blackjack."""
+def sarsa_nstep(env, numeps, epsilon, alpha, gamma, nstep):
     Q = defaultdict(lambda: np.zeros(env.action_space.n))
-    returns_sum = defaultdict(float)
-    returns_count = defaultdict(float)
+    
+    for i in range(numeps):
+        if i % 500 == 0:
+            print("Episode: ", i)
+            
+        state, _ = env.reset()
+        done = False
+        T = float('inf')
+        t = 0
+        
+        # Initialize first action
+        policy = epsilon_greedy_policy(epsilon, Q, env)
+        action = policy(state)
+        
+        buffer = []  # stores state, action, reward tuples
+        
+        while True:
+            if t < T:
+                # Take step and store transition
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                buffer.append((state, action, reward))
+                
+                if done:
+                    T = t + 1
+                else:
+                    state = next_state
+                    action = policy(state)
+            
+            # Calculate update time
+            tau = t - nstep + 1
+            
+            if tau >= 0:
+                # Calculate return
+                G = 0
+                for k in range(tau+1, min(tau+nstep, T)+1):
+                    G += (gamma**(k-tau-1)) * buffer[k-1][2]  # Use reward from buffer
+                
+                # Add bootstrap value if not at terminal state
+                if tau + nstep < T:
+                    state_tau_n = buffer[tau+nstep-1][0]  # Get state from buffer
+                    action_tau_n = buffer[tau+nstep-1][1]  # Get action from buffer
+                    G += (gamma**nstep) * Q[state_tau_n][action_tau_n]
+                
+                # Update Q-value
+                state_tau = buffer[tau][0]
+                action_tau = buffer[tau][1]
+                Q[state_tau][action_tau] += alpha * (G - Q[state_tau][action_tau])
+            
+            t += 1
+            
+            if tau == T - 1:
+                break
+                
+    return Q, policy
 
-    for episode_num in range(1, num_episodes + 1):
-        if debug and episode_num % 10000 == 0:
-            print(f"Episode {episode_num}/{num_episodes}")
 
-        # Generate an episode
-        policy = initialize_random_policy()
-        episode = generate_episode(env, policy)
+def plot_cliffwalking_paths(Q, env):
+    grid_rows, grid_cols = 4, 12  # Grid dimensions for CliffWalking-v0
+    start_state = 36  # Start state index
+    goal_state = 47   # Goal state index
 
-        # Update Q-values
-        update_q_values(episode, Q, returns_sum, returns_count)
+    # Initialize the grid
+    grid = np.zeros((grid_rows, grid_cols), dtype=int)
 
-    # Derive the optimal policy from Q-values
-    optimal_policy = create_greedy_policy(Q)
-    return Q, optimal_policy
+    # Define the cliff area
+    cliff_indices = np.arange(37, 47)
+    for idx in cliff_indices:
+        row, col = divmod(idx, grid_cols)
+        grid[row, col] = -100  # Cliff cells
 
-def plot_3d_value_function(V):
-    """Plot the 3D value function for states without a usable ace."""
-    player_scores = np.arange(12, 22)
-    dealer_scores = np.arange(1, 11)
-    values = np.zeros((len(player_scores), len(dealer_scores)))
+    # Compute the optimal path
+    state, _ = env.reset()
+    optimal_path = []
+    done = False
+    while not done:
+        row, col = divmod(state, grid_cols)
+        optimal_path.append((row, col))
+        action = np.argmax(Q[state]) if state in Q else 0
+        tup = env.step(action)
+        state, _, done, _ = tup if len(tup) == 4 else (tup[0], tup[1], tup[2], None)
 
-    for i, player in enumerate(player_scores):
-        for j, dealer in enumerate(dealer_scores):
-            state = (player, dealer, False)  # Usable ace is False
-            if state in V:
-                values[i, j] = V[state]
+    # Mark the start and goal positions
+    start_row, start_col = divmod(start_state, grid_cols)
+    goal_row, goal_col = divmod(goal_state, grid_cols)
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    X, Y = np.meshgrid(dealer_scores, player_scores)
-    ax.plot_surface(X, Y, values, cmap='viridis')
-    ax.set_xlabel('Dealer Showing')
-    ax.set_ylabel('Player Score')
-    ax.set_zlabel('Value')
-    ax.set_title('Value Function (No Usable Ace)')
+    # Plot the grid
+    plt.figure(figsize=(12, 4))
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            if (r, c) in optimal_path:
+                color = "red" if (r, c) != (start_row, start_col) and (r, c) != (goal_row, goal_col) else "green"
+                plt.text(c, r, 'O', ha='center', va='center', color=color, fontsize=12, fontweight='bold')
+            elif grid[r, c] == -100:
+                plt.text(c, r, 'Cliff', ha='center', va='center', color='gray', fontsize=8, fontweight='bold')
+
+    # Highlight start and goal
+    plt.text(start_col, start_row, 'S', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
+    plt.text(goal_col, goal_row, 'G', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
+
+    # Draw the grid
+    plt.xlim(-0.5, grid_cols - 0.5)
+    plt.ylim(grid_rows - 0.5, -0.5)
+    plt.xticks(range(grid_cols))
+    plt.yticks(range(grid_rows))
+    plt.grid(True)
+    plt.title("Cliff Walking Optimal Path")
     plt.show()
 
+# Plot the optimal path
+
+
+
 if __name__ == "__main__":
-    env = gym.make("Blackjack-v1", sab=True)  # Ensure you're using Gymnasium-compatible environment
-
-    # Run Monte Carlo Control with Exploring Starts
-    num_episodes = 500000
-    Q, optimal_policy = mc_control_with_exploring_starts(env, num_episodes, debug=True)
-
-    # Compute state-value function from action-value function
-    V = {state: max(actions) for state, actions in Q.items()}
-
-            # # Example usage of the optimal policy
-            # test_state = (18, 10, False)
-            # print("Optimal action for state", test_state, ":", optimal_policy(test_state))
-
-    # Plot the 3D value function
-    plot_3d_value_function(V)
+    env = gym.make('CliffWalking-v0')
+    numeps = 1000
+    epsilon = 0.1
+    alpha = 0.1
+    nsteps = 5
+    gamma = 1
+    
+    
+    
+    Q, policy = sarsa_nstep(env, numeps, epsilon, alpha, gamma, nsteps)
+    plot_cliffwalking_paths(Q, env)
+    
