@@ -1,118 +1,144 @@
-import numpy as np
+import numpy as np  
 import matplotlib.pyplot as plt
 import gymnasium as gym
+import time
+import os
 from collections import defaultdict
-import copy
 
-def epsilon_greedy(Q, epsilon, action_space_n):
+env = gym.make('CliffWalking-v0')
+numactions = env.action_space.n
+numstates = env.observation_space.n
+
+def epsilon_greedy_policy(epsilon, Q, env):
     def policy(state):
         if state not in Q:
-            return np.random.choice(action_space_n)
-        # Vectorized operation for epsilon-greedy
-        if np.random.random() < epsilon:
-            return np.random.choice(action_space_n)
-        return int(np.argmax(Q[state]))
+            return np.random.choice(env.action_space.n)
+        else:
+            if np.random.random() > epsilon:
+                return np.argmax(Q[state])
+            else:
+                return np.random.choice(env.action_space.n)
     return policy
 
-def sumQ(Q1, Q2):
-    # More efficient dictionary merging
-    Q = defaultdict(lambda: np.zeros(Q1[next(iter(Q1))].shape))
-    for key in set(Q1.keys()) | set(Q2.keys()):
-        Q[key] = Q1[key] + Q2[key]
-    return Q
+def get_action_probabilities(state, Q, epsilon, num_actions):
+    """Calculate probabilities for each action under epsilon-greedy policy"""
+    if state not in Q:
+        # If state not seen before, return uniform distribution
+        return np.ones(num_actions) / num_actions
+    
+    probs = np.ones(num_actions) * epsilon / num_actions  # exploration probabilities
+    best_action = np.argmax(Q[state])
+    probs[best_action] += 1 - epsilon  # add exploitation probability
+    return probs
 
-def double_qlearning(env, numeps, epsilon, alpha, gamma):
-    action_space_n = env.action_space.n
-    # Pre-allocate numpy arrays for Q-values
-    Q1 = defaultdict(lambda: np.zeros(action_space_n, dtype=np.float32))
-    Q2 = defaultdict(lambda: np.zeros(action_space_n, dtype=np.float32))
+def expected_sarsa(env, numeps, epsilon, alpha, gamma):
+    Q = defaultdict(lambda: np.zeros(env.action_space.n))
+    reward_history = np.zeros(numeps)
     
-    # Create policies once
-    policy = epsilon_greedy(sumQ(Q1, Q2), epsilon, action_space_n)
-    
-    # Vectorized operations for Q-value updates
-    for i in range(1, numeps + 1):
-        if i % 1000 == 0:
-            print(f'episode = {i}')
-        
+    for i in range(numeps):
+        if i % 10000 == 0:
+            print("Episode ", i)
+            
         state, _ = env.reset()
         done = False
+        episode_reward = 0
         
         while not done:
+            # Get current policy and action
+            policy = epsilon_greedy_policy(epsilon, Q, env)
             action = policy(state)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
             
-            # Vectorized Q-value updates
-            if np.random.random() < 0.5:
-                action_greedy = np.argmax(Q1[next_state])
-                Q1[state][action] += alpha * (reward + gamma * Q2[next_state][action_greedy] - Q1[state][action])
-            else:
-                action_greedy = np.argmax(Q2[next_state])
-                Q2[state][action] += alpha * (reward + gamma * Q1[next_state][action_greedy] - Q2[state][action])
+            # Take action
+            tup = env.step(action)
+            next_state, reward, done = tup[0], tup[1], tup[2]
+            
+            # Calculate expected value of next state
+            next_action_probs = get_action_probabilities(next_state, Q, epsilon, env.action_space.n)
+            expected_value = np.sum(next_action_probs * Q[next_state])
+            
+            # Update Q-value using expected SARSA update rule
+            Q[state][action] = Q[state][action] + alpha * (
+                reward + gamma * expected_value - Q[state][action]
+            )
             
             state = next_state
-    
-    final_Q = sumQ(Q1, Q2)
-    return lambda s: np.argmax(final_Q[s]), final_Q
+            episode_reward += reward
+            
+        reward_history[i] = episode_reward
+        
+    return Q, policy, reward_history
 
-def plot_cliffwalking_paths(Q, env, policy):
+# Run the algorithm
+Q, policy, reward_history = expected_sarsa(env, 1000, 0.1, 0.1, 1.0)
+
+# Plotting functions remain the same
+def plot_rewards(reward_history):
+    plt.figure(figsize=(10, 5))
+    plt.plot(reward_history)
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Expected SARSA Reward History")
+    plt.show()
+
+def plot_value_function(Q):
+    V = defaultdict(float)
+    for state, actions in Q.items():
+        V[state] = np.max(actions)
+    
+    V = np.array([V[key] for key in np.arange(0, 48)])
+    V = np.reshape(V, (4, 12))
+    
+    plt.figure(figsize=(12, 4))
+    plt.imshow(V, cmap='hot', interpolation='nearest')
+    plt.colorbar()
+    plt.title("Expected SARSA Value Function")
+    plt.show()
+
+def plot_cliffwalking_paths(Q, env):
     grid_rows, grid_cols = 4, 12
-    start_state, goal_state = 36, 47
-    
-    # Pre-allocate arrays
-    grid = np.zeros((grid_rows, grid_cols), dtype=np.int8)
+    start_state = 36
+    goal_state = 47
+
+    grid = np.zeros((grid_rows, grid_cols), dtype=int)
     cliff_indices = np.arange(37, 47)
-    optimal_path = []
-    
-    # Vectorized cliff marking
-    rows, cols = np.divmod(cliff_indices, grid_cols)
-    grid[rows, cols] = -100
-    
-    # Compute optimal path
+    for idx in cliff_indices:
+        row, col = divmod(idx, grid_cols)
+        grid[row, col] = -100
+
     state, _ = env.reset()
+    optimal_path = []
     done = False
     while not done:
         row, col = divmod(state, grid_cols)
         optimal_path.append((row, col))
-        action = policy(state)
-        next_state, reward, terminated, truncated, _= env.step(action)
-        done = terminated or truncated
-        state = next_state
-    
-    # Plot optimization
-    fig, ax = plt.subplots(figsize=(12, 4))
-    
-    # Batch plot operations
-    for r, c in optimal_path:
-        if (r, c) != divmod(start_state, grid_cols) and (r, c) != divmod(goal_state, grid_cols):
-            ax.text(c, r, 'O', ha='center', va='center', color='red', fontsize=12, fontweight='bold')
-    
-    # Vectorized cliff plotting
-    for r, c in zip(rows, cols):
-        ax.text(c, r, 'Cliff', ha='center', va='center', color='gray', fontsize=8, fontweight='bold')
-    
-    # Plot start and goal
+        action = np.argmax(Q[state])
+        tup = env.step(action)
+        state, _, done = tup[0], tup[1], tup[2]
+
     start_row, start_col = divmod(start_state, grid_cols)
     goal_row, goal_col = divmod(goal_state, grid_cols)
-    ax.text(start_col, start_row, 'S', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
-    ax.text(goal_col, goal_row, 'G', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
-    
-    ax.set_xlim(-0.5, grid_cols - 0.5)
-    ax.set_ylim(grid_rows - 0.5, -0.5)
-    ax.set_xticks(range(grid_cols))
-    ax.set_yticks(range(grid_rows))
-    ax.grid(True)
-    ax.set_title("Cliff Walking Optimal Path")
+
+    plt.figure(figsize=(12, 4))
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            if (r, c) in optimal_path:
+                color = "red" if (r, c) != (start_row, start_col) and (r, c) != (goal_row, goal_col) else "green"
+                plt.text(c, r, 'O', ha='center', va='center', color=color, fontsize=12, fontweight='bold')
+            elif grid[r, c] == -100:
+                plt.text(c, r, 'Cliff', ha='center', va='center', color='gray', fontsize=8, fontweight='bold')
+
+    plt.text(start_col, start_row, 'S', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
+    plt.text(goal_col, goal_row, 'G', ha='center', va='center', color='blue', fontsize=14, fontweight='bold')
+
+    plt.xlim(-0.5, grid_cols - 0.5)
+    plt.ylim(grid_rows - 0.5, -0.5)
+    plt.xticks(range(grid_cols))
+    plt.yticks(range(grid_rows))
+    plt.grid(True)
+    plt.title("Expected SARSA Optimal Path")
     plt.show()
 
-# Usage
-env = gym.make('CliffWalking-v0')
-numeps = 1000
-epsilon = 0.1
-alpha = 0.1
-gamma = 1.0
-
-policy, Q = double_qlearning(env, numeps, epsilon, alpha, gamma)
-print("reached")
-plot_cliffwalking_paths(Q, env, policy)
+# Generate all plots
+plot_rewards(reward_history)
+plot_value_function(Q)
+plot_cliffwalking_paths(Q, env) 
